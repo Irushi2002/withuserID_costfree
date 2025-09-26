@@ -13,12 +13,13 @@ from database import get_database
 from models import SessionStatus
 from rate_limiter import get_followup_rate_limiter, get_weekly_report_rate_limiter
 from quality_score import get_quality_scorer
+from ai_client import AIClientWrapper, AIProviderManager
 
 logger = logging.getLogger(__name__)
 
 class AIFollowupService:
     def __init__(self):
-        """Initialize AI service with multiple API keys and quality scoring"""
+        """Initialize AI service with multiple providers and quality scoring"""
         self.db = get_database()
         self.config = Config()
         
@@ -29,7 +30,10 @@ class AIFollowupService:
         # Get quality scorer
         self.quality_scorer = get_quality_scorer()
         
-        logger.info("AI Followup Service initialized with multiple API keys")
+        # Initialize AI provider manager for followup questions
+        self.provider_manager = AIProviderManager(self.config.AI_PROVIDERS_CONFIG)
+        
+        logger.info("AI Followup Service initialized with multiple AI providers")
         
     async def process_work_update_with_quality_check(
         self, 
@@ -64,43 +68,46 @@ class AIFollowupService:
             # Step 2: If follow-up needed, try to generate AI questions
             logger.info(f"Low quality work update (score: {result['quality_score']}) - generating follow-up")
             
-            # Check if API keys are available
-            available_key = await self.followup_rate_limiter.get_available_api_key(record_call=False)
-            
-            if available_key:
-                # Generate AI follow-up questions
+            # Get available provider
+            available_provider = await self.followup_rate_limiter.get_available_provider(record_call=True)
+            if available_provider:
+                # Generate AI follow-up questions using available provider
                 try:
-                    questions = await self._generate_ai_followup_questions(
+                    questions = await self._generate_ai_followup_questions_multi_provider(
                         intern_id, 
                         work_description, 
-                        available_key
+                        available_provider
                     )
+
                     result["followup_data"] = {
                         "questions": questions,
                         "session_id": None,  # Will be set when session is created
-                        "type": "ai_generated"
+                        "type": f"ai_generated_{available_provider['provider']}",
+                        "provider_name": available_provider['name']
                     }
-                    logger.info(f"AI follow-up questions generated using API key")
+                    logger.info(f"AI follow-up questions generated using {available_provider['name']}")
                     
                 except Exception as e:
-                    logger.error(f"AI question generation failed: {e}")
+                    logger.error(f"AI question generation failed with {available_provider['name']}: {e}")
                     # Fall back to default questions
                     result["followup_data"] = {
                         "questions": self._get_default_questions(),
                         "session_id": None,
-                        "type": "default_fallback"
+                        "type": "default_fallback",
+                        "provider_name": "fallback"
                     }
                     result["fallback_used"] = True
                     logger.info("Using default questions due to AI generation failure")
             else:
-                # All API keys are rate limited - use default questions
+                # All providers are rate limited - use default questions
                 result["followup_data"] = {
                     "questions": self._get_default_questions(),
                     "session_id": None,
-                    "type": "rate_limited_fallback"
+                    "type": "rate_limited_fallback",
+                    "provider_name": "fallback"
                 }
                 result["fallback_used"] = True
-                logger.info("Using default questions due to API rate limits")
+                logger.info("Using default questions due to provider rate limits")
             
             return result
             
@@ -114,23 +121,26 @@ class AIFollowupService:
                 "followup_data": {
                     "questions": self._get_default_questions(),
                     "session_id": None,
-                    "type": "error_fallback"
+                    "type": "error_fallback",
+                    "provider_name": "fallback"
                 },
                 "fallback_used": True
             }
     
-    async def _generate_ai_followup_questions(
+    async def _generate_ai_followup_questions_multi_provider(
         self, 
         intern_id: str, 
         work_description: str,
-        api_key: str
+        provider_config: Dict[str, str]
     ) -> List[str]:
         """
-        Generate AI follow-up questions using specified API key
+        Generate AI follow-up questions using any available provider
         """
-        # Configure genai with the specific API key
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(self.config.GEMINI_MODEL)
+        # Get AI client for the provider
+        client = self.provider_manager.get_client(provider_config['name'])
+        if not client:
+            logger.error(f"No client found for provider: {provider_config['name']}")
+            return self._get_default_questions()
         
         # Build work update data for context
         work_update_data = {
@@ -145,19 +155,19 @@ class AIFollowupService:
         
         prompt = self._build_ai_prompt(current_context, history_context, recent_docs)
         
-        logger.info(f"Sending request to Gemini AI using key: {api_key[:10]}...")
-        response = model.generate_content(prompt)
+        logger.info(f"Sending request to {provider_config['name']} ({provider_config['provider']})")
+        response_text = await client.generate_content(prompt)
         
-        if response.text and response.text.strip():
-            questions = self._parse_questions_from_response(response.text)
+        if response_text and response_text.strip():
+            questions = self._parse_questions_from_response(response_text)
             if len(questions) >= 3:
-                logger.info(f"Successfully generated {len(questions)} AI questions")
+                logger.info(f"Successfully generated {len(questions)} AI questions using {provider_config['name']}")
                 return questions
             else:
-                logger.warning(f"AI generated only {len(questions)} questions, using defaults")
+                logger.warning(f"{provider_config['name']} generated only {len(questions)} questions, using defaults")
                 return self._get_default_questions()
         else:
-            logger.error("AI response was null or empty")
+            logger.error(f"{provider_config['name']} response was null or empty")
             return self._get_default_questions()
     
     async def generate_weekly_report(
@@ -167,15 +177,15 @@ class AIFollowupService:
         end_date: datetime
     ) -> Dict[str, Any]:
         """
-        Generate AI-powered weekly report for an intern using dedicated API key
+        Generate AI-powered weekly report using Gemini
         """
         try:
-            # Get available API key for weekly reports (separate from follow-up keys)
-            api_key = await self.weekly_rate_limiter.wait_if_needed()
+            # Get available provider for weekly reports (Gemini only)
+            provider = await self.weekly_rate_limiter.wait_if_needed()
             
             # Configure genai with weekly report API key
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(self.config.GEMINI_MODEL)
+            genai.configure(api_key=provider['api_key'])
+            model = genai.GenerativeModel(provider['model'])
             
             # Fetch weekly data
             weekly_data = await self._fetch_weekly_data(intern_id, start_date, end_date)
@@ -190,7 +200,7 @@ class AIFollowupService:
             # Build weekly report prompt
             prompt = self._build_weekly_report_prompt(weekly_data, start_date, end_date)
             
-            logger.info(f"Generating weekly report for intern {intern_id} using dedicated API key")
+            logger.info(f"Generating weekly report for intern {intern_id} using {provider['name']}")
             response = model.generate_content(prompt)
             
             if response.text and response.text.strip():
@@ -200,7 +210,8 @@ class AIFollowupService:
                     "data_summary": {
                         "work_updates_count": len(weekly_data["work_updates"]),
                         "followup_sessions_count": len(weekly_data["followup_sessions"]),
-                        "date_range": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+                        "date_range": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+                        "provider_used": provider['name']
                     }
                 }
             else:
@@ -218,52 +229,110 @@ class AIFollowupService:
                 "report": None
             }
     
+    async def test_ai_connection(self) -> Dict[str, Any]:
+        """Test all AI provider connections"""
+        results = {
+            "followup_providers": {},
+            "weekly_report_provider": {},
+            "summary": {}
+        }
+        
+        try:
+            # Test followup providers
+            followup_results = await self.provider_manager.test_all_connections()
+            results["followup_providers"] = followup_results
+            
+            working_providers = sum(1 for result in followup_results.values() if result.get("status") == "working")
+            
+            # Test weekly report provider (Gemini)
+            try:
+                weekly_provider = await self.weekly_rate_limiter.get_available_provider(record_call=False)
+                if weekly_provider:
+                    genai.configure(api_key=weekly_provider['api_key'])
+                    model = genai.GenerativeModel(weekly_provider['model'])
+                    response = model.generate_content('Generate a test weekly report header: "Weekly Report Test"')
+                    
+                    if response.text and "report" in response.text.lower():
+                        results["weekly_report_provider"] = {
+                            "status": "working",
+                            "name": weekly_provider['name'],
+                            "response": response.text[:50] + "..."
+                        }
+                    else:
+                        results["weekly_report_provider"] = {
+                            "status": "failed",
+                            "name": weekly_provider['name'],
+                            "error": "Invalid response"
+                        }
+                else:
+                    results["weekly_report_provider"] = {
+                        "status": "error",
+                        "error": "No weekly report provider available"
+                    }
+                    
+            except Exception as e:
+                results["weekly_report_provider"] = {
+                    "status": "error",
+                    "error": str(e)
+                }
+            
+            # Summary
+            total_followup_providers = len(followup_results)
+            weekly_working = results["weekly_report_provider"].get("status") == "working"
+            
+            results["summary"] = {
+                "total_followup_providers": total_followup_providers,
+                "working_followup_providers": working_providers,
+                "weekly_report_provider_working": weekly_working,
+                "overall_status": "healthy" if working_providers > 0 and weekly_working else "degraded",
+                "fallback_available": True,
+                "provider_types": {
+                    "gemini": sum(1 for r in followup_results.values() if r.get("provider") == "gemini"),
+                    "groq": sum(1 for r in followup_results.values() if r.get("provider") == "groq"),
+                    "huggingface": sum(1 for r in followup_results.values() if r.get("provider") == "huggingface")
+                }
+            }
+            
+            logger.info(f"AI Connection Test: {working_providers}/{total_followup_providers} followup providers working, "
+                       f"weekly provider: {'working' if weekly_working else 'failed'}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"AI connection test failed: {e}")
+            return {
+                "error": str(e),
+                "summary": {
+                    "overall_status": "error",
+                    "fallback_available": True
+                }
+            }
+    
+    # CORRECTED: Fetch weekly data from dailyrecords collection
     async def _fetch_weekly_data(
         self, 
         intern_id: str, 
         start_date: datetime, 
         end_date: datetime
     ) -> Dict[str, Any]:
-        """
-        Fetch all data needed for weekly report generation
-        """
-        work_updates_collection = self.db[Config.WORK_UPDATES_COLLECTION]
+        """Fetch all data needed for weekly report generation from correct collections"""
+        daily_records_collection = self.db["dailyrecords"]  # Query actual data location
         followup_sessions_collection = self.db[Config.FOLLOWUP_SESSIONS_COLLECTION]
         
         # Convert to string format for date queries
         start_date_str = start_date.strftime('%Y-%m-%d')
         end_date_str = end_date.strftime('%Y-%m-%d')
         
-        # Fetch work updates for the week
-        # Handle both userId (old format) and internId (LogBook format)
+        # Fetch work updates from dailyrecords collection (where data actually is)
         work_updates_query = {
-            "$or": [
-                {"userId": intern_id},
-                {"internId": intern_id}
-            ],
-            "$or": [
-                {
-                    "update_date": {
-                        "$gte": start_date_str,
-                        "$lte": end_date_str
-                    }
-                },
-                {
-                    "date": {
-                        "$gte": start_date_str,
-                        "$lte": end_date_str
-                    }
-                },
-                {
-                    "submittedAt": {
-                        "$gte": start_date,
-                        "$lte": end_date
-                    }
-                }
-            ]
+            "internId": intern_id,  # dailyrecords uses internId consistently
+            "date": {
+                "$gte": start_date_str,
+                "$lte": end_date_str
+            }
         }
         
-        work_updates_cursor = work_updates_collection.find(work_updates_query).sort("submittedAt", 1)
+        work_updates_cursor = daily_records_collection.find(work_updates_query).sort("date", 1)
         work_updates = await work_updates_cursor.to_list(length=None)
         
         # Fetch followup sessions for the week
@@ -281,6 +350,8 @@ class AIFollowupService:
         followup_cursor = followup_sessions_collection.find(followup_query).sort("createdAt", 1)
         followup_sessions = await followup_cursor.to_list(length=None)
         
+        logger.info(f"Weekly data fetch: Found {len(work_updates)} work updates and {len(followup_sessions)} sessions for intern {intern_id}")
+        
         return {
             "work_updates": work_updates,
             "followup_sessions": followup_sessions,
@@ -295,9 +366,7 @@ class AIFollowupService:
         start_date: datetime, 
         end_date: datetime
     ) -> str:
-        """
-        Build AI prompt for weekly report generation
-        """
+        """Build AI prompt for weekly report generation"""
         work_updates = weekly_data["work_updates"]
         followup_sessions = weekly_data["followup_sessions"]
         intern_id = weekly_data["intern_id"]
@@ -368,41 +437,43 @@ Format the report in clear sections with appropriate headings."""
         
         return prompt
     
-    # Keep existing methods from original ai_service.py
+    # CORRECTED: Get recent work history from dailyrecords collection
     async def _get_recent_work_history(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get recent work updates for context"""
+        """Get recent work updates for context from correct collections"""
         week_ago = datetime.now() - timedelta(days=7)
+        week_ago_str = week_ago.strftime('%Y-%m-%d')
         
-        # Query BOTH permanent AND temporary collections
-        work_updates_collection = self.db[Config.WORK_UPDATES_COLLECTION]
+        daily_records_collection = self.db["dailyrecords"]  # Query actual data location
         temp_updates_collection = self.db[Config.TEMP_WORK_UPDATES_COLLECTION]
         
-        # Handle both userId and internId formats
-        query = {"$or": [{"userId": user_id}, {"internId": user_id}]}
+        # Get from dailyrecords (permanent storage)
+        daily_records_query = {
+            "internId": user_id,
+            "date": {"$gte": week_ago_str}
+        }
         
-        # Get permanent work updates
-        permanent_cursor = work_updates_collection.find(query)
-        permanent_updates = await permanent_cursor.to_list(None)
+        daily_records_cursor = daily_records_collection.find(daily_records_query)
+        daily_records = await daily_records_cursor.to_list(None)
         
-        # Get temporary work updates  
-        temp_cursor = temp_updates_collection.find(query)
+        # Get from temp collection
+        temp_query = {"internId": user_id}
+        temp_cursor = temp_updates_collection.find(temp_query)
         temp_updates = await temp_cursor.to_list(None)
         
-        # Combine both collections
-        all_work_updates = permanent_updates + temp_updates
-        
-        # Filter and sort in memory
-        filtered_docs = []
-        for doc in all_work_updates:
+        # Filter temp updates by date
+        filtered_temp = []
+        for doc in temp_updates:
             timestamp = self._extract_timestamp(doc)
             if timestamp and timestamp > week_ago:
-                filtered_docs.append(doc)
+                filtered_temp.append(doc)
         
-        # Sort by timestamp (newest first) and limit to 10
-        filtered_docs.sort(key=lambda x: self._extract_timestamp(x) or datetime.min, reverse=True)
-        recent_docs = filtered_docs[:10]
+        # Combine and sort
+        all_work_updates = daily_records + filtered_temp
+        all_work_updates.sort(key=lambda x: self._extract_timestamp(x) or datetime.min, reverse=True)
         
-        return recent_docs
+        logger.info(f"Recent work history: Found {len(daily_records)} from dailyrecords, {len(filtered_temp)} from temp for user {user_id}")
+        
+        return all_work_updates[:10]
     
     async def generate_followup_questions(self, user_id: str, work_update_data: Optional[Dict[str, Any]] = None) -> List[str]:
         """Legacy method - now uses quality-aware processing"""
@@ -414,7 +485,6 @@ Format the report in clear sections with appropriate headings."""
             if not work_description:
                 return self._get_default_questions()
             
-            # Use the new quality-aware processing
             result = await self.process_work_update_with_quality_check(
                 work_description, 
                 user_id
@@ -430,7 +500,7 @@ Format the report in clear sections with appropriate headings."""
             return self._get_default_questions()
     
     def _extract_timestamp(self, doc: Dict[str, Any]) -> Optional[datetime]:
-        """Extract timestamp from document"""
+        """Extract timestamp from document - handles both temp and dailyrecords formats"""
         timestamp = None
         if 'submittedAt' in doc:
             timestamp = doc['submittedAt']
@@ -442,21 +512,21 @@ Format the report in clear sections with appropriate headings."""
                 timestamp = date_field
             elif isinstance(date_field, str):
                 try:
-                    timestamp = parser.parse(date_field)
-                except Exception as e:
-                    logger.warning(f"Error parsing date string: {date_field}")
+                    # For dailyrecords, date is stored as string YYYY-MM-DD
+                    # Convert to datetime for consistent sorting
+                    timestamp = parser.parse(date_field + ' 12:00:00')  # Add time for proper sorting
+                except Exception:
+                    pass
         return timestamp
     
     def _build_current_work_context(self, work_data: Dict[str, Any]) -> str:
         """Build context string from current work update"""
         context_lines = ["CURRENT WORK UPDATE:"]
         
-        # Work description (required)
         description = work_data.get('description', '').strip()
         if description:
             context_lines.append(f"Work Description: {description}")
         
-        # Challenges (optional)
         challenges = work_data.get('challenges', '').strip() if work_data.get('challenges') else None
         if challenges:
             context_lines.append(f"Challenges Today: {challenges}")
@@ -468,7 +538,7 @@ Format the report in clear sections with appropriate headings."""
         """Build context string from work update history"""
         context_lines = ["RECENT WORK HISTORY:"]
         
-        for i, doc in enumerate(docs):
+        for doc in docs:
             date_time = self._extract_timestamp(doc)
             description = doc.get('description', '').strip() or doc.get('task', '').strip()
             challenges = doc.get('challenges', '').strip() or doc.get('progress', '').strip()
@@ -488,7 +558,7 @@ Format the report in clear sections with appropriate headings."""
         return '\n'.join(context_lines)
     
     def _build_ai_prompt(self, current_context: str, history_context: str, recent_docs: List[Dict[str, Any]]) -> str:
-        """Build AI prompt for question generation"""
+        """Build AI prompt for question generation - SAME FOR ALL PROVIDERS"""
         
         today_work_update = current_context
         yesterday_plans = self._extract_yesterday_plans_from_recent_docs(recent_docs)
@@ -528,31 +598,24 @@ Format your response as:
         
         yesterday = datetime.now().date() - timedelta(days=1)
         
-        # First, try to find plans from exactly yesterday
         for doc in recent_docs:
             timestamp = self._extract_timestamp(doc)
             if timestamp and timestamp.date() == yesterday:
                 plans = doc.get('plans', '').strip() or doc.get('blockers', '').strip()
                 if plans:
-                    logger.info(f"Found yesterday's plans from {timestamp.date()}: {plans[:50]}...")
                     return plans
         
-        # If no plans found for yesterday, get the most recent plans available
         today = datetime.now().date()
         
         for doc in recent_docs:
             timestamp = self._extract_timestamp(doc)
-            # Skip today's entries
             if timestamp and timestamp.date() == today:
                 continue
                 
             plans = doc.get('plans', '').strip() or doc.get('blockers', '').strip()
             if plans:
-                date_str = timestamp.strftime('%Y-%m-%d') if timestamp else 'Unknown date'
-                logger.info(f"Found most recent plans from {date_str}: {plans[:50]}...")
                 return plans
         
-        logger.info("No previous plans found in recent work updates")
         return "No previous plans found"
     
     def _extract_current_challenges(self, current_context: str) -> str:
@@ -568,53 +631,39 @@ Format your response as:
         return challenges
     
     def _parse_questions_from_response(self, response: str) -> List[str]:
-        """Parse questions from AI response"""
+        """Parse questions from AI response - WORKS FOR ALL PROVIDERS"""
         questions = []
-        logger.info("Parsing AI response for questions...")
         
-        # Split by lines
         lines = response.split('\n')
         
-        # Look for numbered questions
         for line in lines:
             trimmed = line.strip()
-            # Look for lines that start with numbers (1., 2., etc.) or (1), (2), etc.
             if re.match(r'^\d+[.\)]\s*', trimmed):
-                # Remove the number and clean up the question
                 question = re.sub(r'^\d+[.\)]\s*', '', trimmed).strip()
-                # Remove any markdown formatting
                 question = re.sub(r'\*\*.*?\*\*:\s*', '', question)
                 if question and len(question) > 10:
                     questions.append(question)
-                    logger.info(f"Parsed question {len(questions)}: {question[:50]}...")
         
-        # If we don't have enough questions, look for question patterns
         if len(questions) < 3:
             for line in lines:
                 trimmed = line.strip()
-                # Skip empty lines and headers
                 if not trimmed or trimmed.startswith('#') or trimmed.startswith('**') and not trimmed.endswith('?'):
                     continue
                 
-                # Look for actual questions
                 if '?' in trimmed and len(trimmed) > 15:
-                    # Clean up the question
                     question = re.sub(r'^\d+[.\)]\s*', '', trimmed)
                     question = re.sub(r'\*\*.*?\*\*:\s*', '', question)
                     question = question.strip()
                     
                     if question and not any(q.lower() in question.lower() for q in questions):
                         questions.append(question)
-                        logger.info(f"Parsed pattern question {len(questions)}: {question[:50]}...")
                         
                         if len(questions) >= 3:
                             break
         
-        # Ensure exactly 3 questions
         if len(questions) > 3:
             questions = questions[:3]
         elif len(questions) < 3:
-            # Fill with default questions if we don't have enough
             defaults = self._get_default_questions()
             while len(questions) < 3 and len(questions) < len(defaults):
                 questions.append(defaults[len(questions)])
@@ -622,7 +671,7 @@ Format your response as:
         return questions
     
     def _get_default_questions(self) -> List[str]:
-        """Default questions when AI generation fails or API keys are exhausted"""
+        """Default questions when AI generation fails or providers are exhausted"""
         return [
             "What specific steps did you take to complete this task?",
             "Did you encounter any technical issues or blockers while working?",
@@ -632,8 +681,6 @@ Format your response as:
     # Keep existing session management methods
     async def save_followup_session(self, user_id: str, questions: List[str]) -> str:
         """Save follow-up session to MongoDB"""
-        logger.info(f"Called save_followup_session with userId: {user_id}")
-        
         try:
             session_id = f"{user_id}_{uuid.uuid4().hex}"
             
@@ -692,14 +739,12 @@ Format your response as:
         try:
             followup_collection = self.db[Config.FOLLOWUP_SESSIONS_COLLECTION]
             
-            # Handle both userId and internId formats
             query = {
                 "$or": [{"userId": user_id}, {"internId": user_id}],
                 "status": SessionStatus.PENDING
             }
             
             cursor = followup_collection.find(query).sort("createdAt", DESCENDING).limit(1)
-            
             sessions = await cursor.to_list(1)
             
             if sessions:
@@ -717,97 +762,3 @@ Format your response as:
         except Exception as e:
             logger.error(f"Error getting pending follow-up session: {e}")
             return None
-
-    async def test_ai_connection(self) -> Dict[str, Any]:
-        """Test method to check if AI is working with multiple keys"""
-        results = {
-            "followup_keys": {},
-            "weekly_report_key": {},
-            "summary": {}
-        }
-        
-        try:
-            # Test followup API keys
-            followup_keys = self.config.GOOGLE_API_KEYS
-            working_followup_keys = 0
-            
-            for i, api_key in enumerate(followup_keys, 1):
-                try:
-                    genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel(self.config.GEMINI_MODEL)
-                    response = model.generate_content('Generate a simple test response: "AI is working"')
-                    
-                    if response.text and "working" in response.text.lower():
-                        results["followup_keys"][f"key_{i}"] = {
-                            "status": "working",
-                            "key_prefix": api_key[:10] + "...",
-                            "response": response.text[:50] + "..."
-                        }
-                        working_followup_keys += 1
-                    else:
-                        results["followup_keys"][f"key_{i}"] = {
-                            "status": "failed",
-                            "key_prefix": api_key[:10] + "...",
-                            "error": "Invalid response"
-                        }
-                        
-                except Exception as e:
-                    results["followup_keys"][f"key_{i}"] = {
-                        "status": "error",
-                        "key_prefix": api_key[:10] + "...",
-                        "error": str(e)
-                    }
-            
-            # Test weekly report API key
-            try:
-                weekly_api_key = self.config.WEEKLY_REPORT_API_KEY
-                genai.configure(api_key=weekly_api_key)
-                model = genai.GenerativeModel(self.config.GEMINI_MODEL)
-                response = model.generate_content('Generate a test weekly report header: "Weekly Report Test"')
-                
-                if response.text and "report" in response.text.lower():
-                    results["weekly_report_key"] = {
-                        "status": "working",
-                        "key_prefix": weekly_api_key[:10] + "...",
-                        "response": response.text[:50] + "..."
-                    }
-                else:
-                    results["weekly_report_key"] = {
-                        "status": "failed",
-                        "key_prefix": weekly_api_key[:10] + "...",
-                        "error": "Invalid response"
-                    }
-                    
-            except Exception as e:
-                results["weekly_report_key"] = {
-                    "status": "error",
-                    "key_prefix": self.config.WEEKLY_REPORT_API_KEY[:10] + "..." if self.config.WEEKLY_REPORT_API_KEY else "None",
-                    "error": str(e)
-                }
-            
-            # Summary
-            total_followup_keys = len(followup_keys)
-            weekly_key_working = results["weekly_report_key"].get("status") == "working"
-            
-            results["summary"] = {
-                "total_followup_keys": total_followup_keys,
-                "working_followup_keys": working_followup_keys,
-                "weekly_report_key_working": weekly_key_working,
-                "overall_status": "healthy" if working_followup_keys > 0 and weekly_key_working else "degraded",
-                "fallback_available": True  # We always have default questions
-            }
-            
-            logger.info(f"AI Connection Test: {working_followup_keys}/{total_followup_keys} followup keys working, "
-                       f"weekly key: {'working' if weekly_key_working else 'failed'}")
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"AI connection test failed: {e}")
-            return {
-                "error": str(e),
-                "summary": {
-                    "overall_status": "error",
-                    "fallback_available": True
-                }
-            }

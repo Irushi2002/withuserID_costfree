@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from typing import List
+from typing import List, Dict
 
 load_dotenv()
 
@@ -9,41 +9,89 @@ class Config:
     MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
     DATABASE_NAME = os.getenv("DATABASE_NAME", "intern_progress")
     
-    # Multiple Google AI API Keys Configuration
-    # 4 API keys for regular follow-up generation
+    # AI Provider Configuration
+    # Gemini API Keys (2 keys)
     GOOGLE_API_KEY_1 = os.getenv("GOOGLE_API_KEY_1")
-    GOOGLE_API_KEY_2 = os.getenv("GOOGLE_API_KEY_2") 
-    GOOGLE_API_KEY_3 = os.getenv("GOOGLE_API_KEY_3")
-    GOOGLE_API_KEY_4 = os.getenv("GOOGLE_API_KEY_4")
+    GOOGLE_API_KEY_2 = os.getenv("GOOGLE_API_KEY_2")
     
-    # 1 separate API key for weekly reports
+    # Groq API Key (1 key)
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    
+    # Hugging Face API Key (1 key)
+    HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+    
+    # Weekly Report API Key (keep same - Gemini)
     WEEKLY_REPORT_API_KEY = os.getenv("WEEKLY_REPORT_API_KEY")
     
-    # Legacy single API key (for backward compatibility)
+    # Legacy API Key (for backward compatibility)
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     
     # Rate limiting configuration
     RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "12"))
     
     @property
+    def AI_PROVIDERS_CONFIG(self) -> List[Dict[str, str]]:
+        """Get list of all available AI provider configurations"""
+        providers = []
+        
+        # Add Gemini providers
+        if self.GOOGLE_API_KEY_1:
+            providers.append({
+                "provider": "gemini",
+                "api_key": self.GOOGLE_API_KEY_1,
+                "model": "gemini-2.0-flash",
+                "name": "Gemini_1"
+            })
+        
+        if self.GOOGLE_API_KEY_2:
+            providers.append({
+                "provider": "gemini",
+                "api_key": self.GOOGLE_API_KEY_2,
+                "model": "gemini-2.0-flash",
+                "name": "Gemini_2"
+            })
+        
+        # Add Groq provider
+        if self.GROQ_API_KEY:
+            providers.append({
+                "provider": "groq",
+                "api_key": self.GROQ_API_KEY,
+                "model": "llama-3.3-70b-versatile",
+                "name": "Groq_Llama3"
+            })
+        
+        # Add Hugging Face provider
+        if self.HUGGINGFACE_API_KEY:
+            providers.append({
+                "provider": "huggingface",
+                "api_key": self.HUGGINGFACE_API_KEY,
+                "model": "google/flan-t5-large",
+                "name": "HuggingFace_FLAN_T5"
+            })
+        
+        # Fallback to legacy if no providers configured
+        if not providers and self.GOOGLE_API_KEY:
+            providers.append({
+                "provider": "gemini",
+                "api_key": self.GOOGLE_API_KEY,
+                "model": "gemini-2.0-flash",
+                "name": "Gemini_Legacy"
+            })
+            
+        return providers
+    
+    @property
     def GOOGLE_API_KEYS(self) -> List[str]:
-        """Get list of all available followup API keys"""
-        keys = [
-            self.GOOGLE_API_KEY_1,
-            self.GOOGLE_API_KEY_2, 
-            self.GOOGLE_API_KEY_3,
-            self.GOOGLE_API_KEY_4
-        ]
-        # Filter out None values and return valid keys
+        """Get list of Gemini API keys for backward compatibility"""
+        keys = [self.GOOGLE_API_KEY_1, self.GOOGLE_API_KEY_2]
         valid_keys = [key for key in keys if key]
         
-        # If no multiple keys configured, fall back to single key for backward compatibility
         if not valid_keys and self.GOOGLE_API_KEY:
             valid_keys = [self.GOOGLE_API_KEY]
             
         return valid_keys
     
-    # Application Configuration - REMOVED JWT REQUIREMENT
+    # Application Configuration
     SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here")
     DEBUG = os.getenv("DEBUG", "False").lower() == "true"
     
@@ -51,9 +99,12 @@ class Config:
     WORK_UPDATES_COLLECTION = "work_updates"
     TEMP_WORK_UPDATES_COLLECTION = "temp_work_updates"
     FOLLOWUP_SESSIONS_COLLECTION = "followup_sessions"
+    DAILY_RECORDS_COLLECTION = "dailyrecords"
     
     # AI Model Configuration
     GEMINI_MODEL = "gemini-2.0-flash"
+    GROQ_MODEL = "llama3-70b-8192"
+    HUGGINGFACE_MODEL = "google/flan-t5-large"  # Better for questions
     
     # Quality Scoring Configuration
     QUALITY_SCORE_THRESHOLD = float(os.getenv("QUALITY_SCORE_THRESHOLD", "6.0"))
@@ -84,12 +135,12 @@ class Config:
     
     @classmethod
     def validate_config_simplified(cls):
-        """Validate required configuration - SIMPLIFIED VERSION (NO JWT REQUIRED)"""
-        # Check if we have at least one API key configured
-        if not cls().GOOGLE_API_KEYS:
-            raise ValueError("At least one Google API key is required (GOOGLE_API_KEY_1-4 or GOOGLE_API_KEY)")
+        """Validate required configuration"""
+        config = cls()
         
-        # JWT Secret NO LONGER REQUIRED for user_id input field method
+        # Check if we have at least one AI provider configured
+        if not config.AI_PROVIDERS_CONFIG:
+            raise ValueError("At least one AI provider must be configured (Gemini, Groq, or Hugging Face)")
         
         # Check weekly report API key
         if not cls.WEEKLY_REPORT_API_KEY:
@@ -101,14 +152,22 @@ class Config:
     def get_api_key_summary(cls):
         """Get summary of API key configuration for logging"""
         config = cls()
-        followup_keys = len(config.GOOGLE_API_KEYS)
-        weekly_key = bool(config.WEEKLY_REPORT_API_KEY)
+        providers = config.AI_PROVIDERS_CONFIG
         
-        return {
-            "followup_keys": followup_keys,
-            "weekly_report_key": weekly_key,
-            "total_configured": followup_keys + (1 if weekly_key else 0),
-            "jwt_required": False,  # NO JWT REQUIRED with user_id field method
+        summary = {
+            "total_providers": len(providers),
+            "providers": {provider["name"]: provider["provider"] for provider in providers},
+            "weekly_report_key": bool(config.WEEKLY_REPORT_API_KEY),
             "rate_limit_per_minute": config.RATE_LIMIT_PER_MINUTE,
             "authentication_method": "user_id_in_request_field"
+        }
+        
+        return {
+            "followup_keys": len(providers),
+            "weekly_report_key": bool(config.WEEKLY_REPORT_API_KEY),
+            "total_configured": len(providers) + (1 if config.WEEKLY_REPORT_API_KEY else 0),
+            "jwt_required": False,
+            "rate_limit_per_minute": config.RATE_LIMIT_PER_MINUTE,
+            "authentication_method": "user_id_in_request_field",
+            "provider_details": summary
         }

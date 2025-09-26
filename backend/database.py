@@ -1,5 +1,3 @@
-# database.py - COMPLETE FIXED VERSION with Clean Migration
-
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import DESCENDING, ASCENDING
 from config import Config
