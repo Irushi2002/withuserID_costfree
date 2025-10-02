@@ -61,7 +61,6 @@ async def cleanup_problematic_indexes():
             collection = database.database[collection_name]
             
             try:
-                # List existing indexes
                 existing_indexes = await collection.list_indexes().to_list(length=None)
                 
                 for index in existing_indexes:
@@ -83,6 +82,8 @@ async def cleanup_problematic_indexes():
         
     except Exception as e:
         logger.warning(f"Index cleanup failed: {e}")
+
+
 
 async def create_clean_indexes():
     """Create clean indexes without conflicts"""
@@ -127,7 +128,10 @@ async def create_clean_indexes():
         logger.warning(f"Failed to create some clean indexes: {e}")
 
 async def run_clean_migration():
-    """Run clean migration without conflicts"""
+    """
+    Run clean migration without deleting existing data
+    PRESERVES all followup sessions and work updates
+    """
     try:
         # Step 1: Add followupCompleted field to documents missing it
         work_updates = database.database[Config.WORK_UPDATES_COLLECTION]
@@ -143,7 +147,8 @@ async def run_clean_migration():
             
             logger.info(f"Added followupCompleted field to {result.modified_count} documents")
         
-        # Step 2: Clean migration from userId to internId (remove duplicates first)
+        # Step 2: SAFE migration from userId to internId
+        # DO NOT DELETE - only migrate field names
         collections_to_migrate = [
             (Config.WORK_UPDATES_COLLECTION, "work_updates"),
             (TEMP_WORK_UPDATES_COLLECTION, "temp_work_updates"), 
@@ -153,12 +158,7 @@ async def run_clean_migration():
         for collection_name, display_name in collections_to_migrate:
             collection = database.database[collection_name]
             
-            # First, remove documents with null userId to avoid conflicts
-            null_user_result = await collection.delete_many({"userId": None})
-            if null_user_result.deleted_count > 0:
-                logger.info(f"Removed {null_user_result.deleted_count} documents with null userId from {display_name}")
-            
-            # Find documents that need migration (have userId but not internId)
+            # Find documents that have userId but not internId
             docs_to_migrate = await collection.find({
                 "userId": {"$exists": True, "$ne": None},
                 "$or": [
@@ -168,7 +168,7 @@ async def run_clean_migration():
             }).to_list(length=None)
             
             if docs_to_migrate:
-                logger.info(f"Migrating {len(docs_to_migrate)} documents from userId to internId in {display_name}...")
+                logger.info(f"Migrating {len(docs_to_migrate)} documents in {display_name} (PRESERVING all data)...")
                 
                 migrated_count = 0
                 
@@ -176,30 +176,40 @@ async def run_clean_migration():
                     user_id = doc.get('userId')
                     
                     if user_id is None:
+                        # Skip null userId but DON'T delete
                         continue
                     
                     try:
-                        # Update this specific document
+                        # Copy userId to internId, keep userId for compatibility
                         await collection.update_one(
                             {"_id": doc["_id"]},
-                            {
-                                "$set": {"internId": user_id},
-                                "$unset": {"userId": ""}
-                            }
+                            {"$set": {"internId": user_id}}
+                            # NOTE: We keep userId field for backward compatibility
                         )
                         migrated_count += 1
                         
                     except Exception as e:
                         logger.warning(f"Failed to migrate document {doc['_id']} in {display_name}: {e}")
                 
-                logger.info(f"Migration complete for {display_name}: {migrated_count} migrated successfully")
+                logger.info(f"✅ Migration complete for {display_name}: {migrated_count} documents migrated (all data preserved)")
             else:
                 logger.info(f"No documents to migrate in {display_name}")
         
-        logger.info("Clean data migration completed successfully")
+        # Step 3: Count preserved followup sessions
+        followup_collection = database.database[Config.FOLLOWUP_SESSIONS_COLLECTION]
+        total_sessions = await followup_collection.count_documents({})
+        pending_sessions = await followup_collection.count_documents({"status": "pending"})
+        completed_sessions = await followup_collection.count_documents({"status": "completed"})
+        
+        logger.info(f"📊 Followup Sessions Preserved: {total_sessions} total "
+                   f"({pending_sessions} pending, {completed_sessions} completed)")
+        
+        logger.info("✅ Clean data migration completed - ALL EXISTING DATA PRESERVED")
         
     except Exception as e:
-        logger.warning(f"Migration failed: {e}")
+        logger.error(f"Migration failed: {e}")
+
+
 
 async def setup_ttl_indexes():
     """Setup TTL index for automatic cleanup of temp work updates"""
@@ -426,47 +436,44 @@ async def get_work_update_data(intern_id: str, work_update_id: str = None):
         return None
 
 async def cleanup_abandoned_temp_updates(hours_old: int = 24):
-    """Clean up temporary work updates and associated sessions"""
+    """
+    Clean up ONLY temporary work updates that are truly abandoned
+    NEVER touches followup_sessions collection
+    Followup sessions are PERMANENT records and should never be auto-deleted
+    """
     try:
         temp_collection = database.database[TEMP_WORK_UPDATES_COLLECTION]
-        followup_sessions = database.database[Config.FOLLOWUP_SESSIONS_COLLECTION]
         
         cutoff_time = datetime.now() - timedelta(hours=hours_old)
         
+        # Only clean temp_work_updates, NOT followup_sessions
         abandoned_cursor = temp_collection.find({
             "submittedAt": {"$lt": cutoff_time},
             "temp_status": "pending_followup"
         })
         
         abandoned_count = 0
-        deleted_sessions_count = 0
         
         async for temp_update in abandoned_cursor:
-            temp_id = str(temp_update["_id"])
-            
-            # Clean up associated sessions
-            session_delete_result = await followup_sessions.delete_many({
-                "$or": [
-                    {"tempWorkUpdateId": temp_id},
-                    {"workUpdateId": temp_id}
-                ]
-            })
-            
-            deleted_sessions_count += session_delete_result.deleted_count
-            
-            # Delete the temp update
+            # Delete the temp update only
             await temp_collection.delete_one({"_id": temp_update["_id"]})
             abandoned_count += 1
         
         if abandoned_count > 0:
-            logger.info(f"Manual cleanup: {abandoned_count} abandoned temp updates, {deleted_sessions_count} sessions")
+            logger.info(f"Manual cleanup: {abandoned_count} abandoned temp updates (followup sessions preserved)")
         else:
             logger.info("Manual cleanup: No abandoned temporary updates found (TTL working properly)")
         
+        # Verify followup sessions are intact
+        followup_collection = database.database[Config.FOLLOWUP_SESSIONS_COLLECTION]
+        total_sessions = await followup_collection.count_documents({})
+        logger.info(f"✅ Followup sessions preserved: {total_sessions} total sessions remain intact")
+        
         return {
             "deleted_temp_updates": abandoned_count,
-            "deleted_sessions": deleted_sessions_count,
-            "note": "TTL index handles most deletions automatically"
+            "deleted_sessions": 0,  # We NEVER delete sessions
+            "preserved_sessions": total_sessions,
+            "note": "Followup sessions are permanent records and are always preserved"
         }
         
     except Exception as e:

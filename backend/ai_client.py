@@ -117,89 +117,89 @@ class AIClientWrapper:
             logger.error(f"Groq ({self.name}) generation failed: {e}")
             return None
     
-    async def _generate_huggingface(self, prompt: str) -> Optional[str]:
-        """Generate content using Hugging Face"""
-        try:
-            # Format prompt for better question generation
-            formatted_prompt = f"Generate 3 follow-up questions based on this work update:\n\n{prompt}\n\nQuestions:\n1."
+    # async def _generate_huggingface(self, prompt: str) -> Optional[str]:
+    #     """Generate content using Hugging Face"""
+    #     try:
+    #         # Format prompt for better question generation
+    #         formatted_prompt = f"Generate 3 follow-up questions based on this work update:\n\n{prompt}\n\nQuestions:\n1."
             
-            # Different models need different formatting
-            if "flan-t5" in self.model.lower():
-                data = {
-                    "inputs": formatted_prompt,
-                    "parameters": {
-                        "max_new_tokens": 200,
-                        "temperature": 0.7,
-                        "do_sample": True
-                    }
-                }
-            elif "dialogpt" in self.model.lower():
-                data = {
-                    "inputs": formatted_prompt,
-                    "parameters": {
-                        "max_length": 300,
-                        "temperature": 0.8,
-                        "pad_token_id": 50256
-                    }
-                }
-            elif "blenderbot" in self.model.lower():
-                data = {
-                    "inputs": formatted_prompt,
-                    "parameters": {
-                        "max_length": 250,
-                        "temperature": 0.7
-                    }
-                }
-            else:
-                # Generic approach
-                data = {"inputs": formatted_prompt}
+    #         # Different models need different formatting
+    #         if "flan-t5" in self.model.lower():
+    #             data = {
+    #                 "inputs": formatted_prompt,
+    #                 "parameters": {
+    #                     "max_new_tokens": 200,
+    #                     "temperature": 0.7,
+    #                     "do_sample": True
+    #                 }
+    #             }
+    #         elif "dialogpt" in self.model.lower():
+    #             data = {
+    #                 "inputs": formatted_prompt,
+    #                 "parameters": {
+    #                     "max_length": 300,
+    #                     "temperature": 0.8,
+    #                     "pad_token_id": 50256
+    #                 }
+    #             }
+    #         elif "blenderbot" in self.model.lower():
+    #             data = {
+    #                 "inputs": formatted_prompt,
+    #                 "parameters": {
+    #                     "max_length": 250,
+    #                     "temperature": 0.7
+    #                 }
+    #             }
+    #         else:
+    #             # Generic approach
+    #             data = {"inputs": formatted_prompt}
             
-            response = requests.post(
-                self.base_url,
-                headers=self.headers,
-                json=data,
-                timeout=30
-            )
+    #         response = requests.post(
+    #             self.base_url,
+    #             headers=self.headers,
+    #             json=data,
+    #             timeout=30
+    #         )
             
-            if response.status_code == 200:
-                result = response.json()
+    #         if response.status_code == 200:
+    #             result = response.json()
                 
-                # Handle different response formats from HuggingFace
-                content = None
-                if isinstance(result, list) and len(result) > 0:
-                    if "generated_text" in result[0]:
-                        content = result[0]["generated_text"]
-                    elif "translation_text" in result[0]:
-                        content = result[0]["translation_text"]
-                    else:
-                        content = str(result[0])
-                elif isinstance(result, dict):
-                    content = result.get("generated_text") or result.get("translation_text") or str(result)
-                else:
-                    content = str(result)
+    #             # Handle different response formats from HuggingFace
+    #             content = None
+    #             if isinstance(result, list) and len(result) > 0:
+    #                 if "generated_text" in result[0]:
+    #                     content = result[0]["generated_text"]
+    #                 elif "translation_text" in result[0]:
+    #                     content = result[0]["translation_text"]
+    #                 else:
+    #                     content = str(result[0])
+    #             elif isinstance(result, dict):
+    #                 content = result.get("generated_text") or result.get("translation_text") or str(result)
+    #             else:
+    #                 content = str(result)
                 
-                if content and content.strip():
-                    # Clean up the response (remove the original prompt if included)
-                    if content.startswith(formatted_prompt):
-                        content = content[len(formatted_prompt):].strip()
-                    elif content.startswith(prompt):
-                        content = content[len(prompt):].strip()
+    #             if content and content.strip():
+    #                 # Clean up the response (remove the original prompt if included)
+    #                 if content.startswith(formatted_prompt):
+    #                     content = content[len(formatted_prompt):].strip()
+    #                 elif content.startswith(prompt):
+    #                     content = content[len(prompt):].strip()
                     
-                    logger.info(f"HuggingFace ({self.name}) generated response: {len(content)} chars")
-                    return content
-                else:
-                    logger.warning(f"HuggingFace ({self.name}) returned empty content")
-                    return None
-            elif response.status_code == 503:
-                logger.warning(f"HuggingFace ({self.name}) model loading: {response.json().get('error', 'Unknown error')}")
-                return None
-            else:
-                logger.error(f"HuggingFace ({self.name}) API error: {response.status_code} - {response.text}")
-                return None
+    #                 logger.info(f"HuggingFace ({self.name}) generated response: {len(content)} chars")
+    #                 return content
+    #             else:
+    #                 logger.warning(f"HuggingFace ({self.name}) returned empty content")
+    #                 return None
+    #         elif response.status_code == 503:
+    #             logger.warning(f"HuggingFace ({self.name}) model loading: {response.json().get('error', 'Unknown error')}")
+    #             return None
+    #         else:
+    #             logger.error(f"HuggingFace ({self.name}) API error: {response.status_code} - {response.text}")
+    #             return None
                 
-        except Exception as e:
-            logger.error(f"HuggingFace ({self.name}) generation failed: {e}")
-            return None
+    #     except Exception as e:
+    #         logger.error(f"HuggingFace ({self.name}) generation failed: {e}")
+    #         return None
     
     async def test_connection(self) -> Dict[str, Any]:
         """

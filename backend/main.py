@@ -40,7 +40,10 @@ logger = logging.getLogger(__name__)
 cleanup_task = None
 
 async def scheduled_cleanup_task():
-    """Background task for cleanup (backup to TTL)"""
+    """
+    Background task for cleanup (backup to TTL)
+    ONLY cleans temp_work_updates, NEVER touches followup_sessions
+    """
     while True:
         try:
             logger.info("Running scheduled cleanup (backup to TTL)...")
@@ -49,14 +52,17 @@ async def scheduled_cleanup_task():
             result = await cleanup_abandoned_temp_updates(25 if ttl_working else 24)
             
             deleted_temp = result.get("deleted_temp_updates", 0)
-            deleted_sessions = result.get("deleted_sessions", 0)
+            preserved_sessions = result.get("preserved_sessions", 0)
             
-            if deleted_temp > 0 or deleted_sessions > 0:
+            if deleted_temp > 0:
                 cleanup_type = "backup" if ttl_working else "primary"
-                logger.info(f"Scheduled {cleanup_type} cleanup: Removed {deleted_temp} temp updates and {deleted_sessions} sessions")
+                logger.info(f"Scheduled {cleanup_type} cleanup: "
+                           f"Removed {deleted_temp} temp updates, "
+                           f"Preserved {preserved_sessions} followup sessions")
             else:
                 status = "TTL working properly" if ttl_working else "No items found"
-                logger.info(f"Scheduled cleanup: {status}")
+                logger.info(f"Scheduled cleanup: {status}, "
+                           f"{preserved_sessions} followup sessions preserved")
                 
         except Exception as e:
             logger.error(f"Error in scheduled cleanup: {e}")
@@ -68,7 +74,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     global cleanup_task
     
-    # Startup
+ 
     try:
         Config.validate_config_simplified()
         await connect_to_mongo()
@@ -121,7 +127,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
+    allow_origins=["*"],   
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -245,11 +251,11 @@ async def create_work_update(
         if work_update.status == WorkStatus.LEAVE:
             # ON LEAVE: Save directly to LogBook's DailyRecord collection
             daily_records = db["dailyrecords"]
-            date_based_query = {"internId": intern_id, "date": today_date}  # FIXED: Removed ObjectId()
+            date_based_query = {"internId": intern_id, "date": today_date}  
             existing_record = await daily_records.find_one(date_based_query)
 
             record_dict = {
-                "internId": intern_id,  # FIXED: Removed ObjectId()
+                "internId": intern_id,   
                 "date": today_date,
                 "stack": work_update.stack,
                 "task": work_update.task or "On Leave",
@@ -335,11 +341,11 @@ async def create_work_update(
             else:
                 # High quality - save directly to LogBook
                 daily_records = db["dailyrecords"]
-                date_based_query = {"internId": intern_id, "date": today_date}  # FIXED: Removed ObjectId()
+                date_based_query = {"internId": intern_id, "date": today_date}  
                 existing_record = await daily_records.find_one(date_based_query)
 
                 record_dict = {
-                    "internId": intern_id,  # FIXED: Removed ObjectId()
+                    "internId": intern_id,   
                     "date": today_date,
                     "stack": work_update.stack,
                     "task": work_update.task,
@@ -494,7 +500,7 @@ async def complete_followup_session(
         
         db = get_database()
         followup_collection = db[Config.FOLLOWUP_SESSIONS_COLLECTION]
-        #daily_records = db["dailyrecords"]
+        
         daily_records = db[Config.DAILY_RECORDS_COLLECTION]
         
         # Get the follow-up session and verify ownership
@@ -545,7 +551,7 @@ async def complete_followup_session(
 
         # Check for existing record (override logic)
         existing_record = await daily_records.find_one({
-            "internId": intern_id,  # FIXED: Removed ObjectId() - keep as string
+            "internId": intern_id,   
             "date": temp_work_update["date"]
         })
         

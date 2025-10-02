@@ -17,10 +17,7 @@ class Config:
     # Groq API Key (1 key)
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     
-    # Hugging Face API Key (1 key)
-    HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-    
-    # Weekly Report API Key (keep same - Gemini)
+    # Weekly Report API Key  
     WEEKLY_REPORT_API_KEY = os.getenv("WEEKLY_REPORT_API_KEY")
     
     # Legacy API Key (for backward compatibility)
@@ -60,15 +57,6 @@ class Config:
                 "name": "Groq_Llama3"
             })
         
-        # Add Hugging Face provider
-        if self.HUGGINGFACE_API_KEY:
-            providers.append({
-                "provider": "huggingface",
-                "api_key": self.HUGGINGFACE_API_KEY,
-                "model": "google/flan-t5-large",
-                "name": "HuggingFace_FLAN_T5"
-            })
-        
         # Fallback to legacy if no providers configured
         if not providers and self.GOOGLE_API_KEY:
             providers.append({
@@ -104,7 +92,7 @@ class Config:
     # AI Model Configuration
     GEMINI_MODEL = "gemini-2.0-flash"
     GROQ_MODEL = "llama3-70b-8192"
-    HUGGINGFACE_MODEL = "google/flan-t5-large"  # Better for questions
+    HUGGINGFACE_MODEL = "google/flan-t5-base"   
     
     # Quality Scoring Configuration
     QUALITY_SCORE_THRESHOLD = float(os.getenv("QUALITY_SCORE_THRESHOLD", "6.0"))

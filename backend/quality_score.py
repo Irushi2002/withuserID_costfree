@@ -107,7 +107,7 @@ class QualityScorer:
             structure_score, has_structure = self._check_structure(content)
             
             # 6. Time-based behavior (future enhancement - placeholder for now)
-            time_penalty = 0  # Could check for late submissions, missed days, etc.
+            time_penalty = 0   
             
             # Calculate raw score
             raw_score = (
@@ -182,11 +182,11 @@ class QualityScorer:
         """
         word_count = len(content.split())
         
-        if word_count >= self.config.WORD_COUNT_OK_THRESHOLD:  # >= 25 words
+        if word_count >= self.config.WORD_COUNT_OK_THRESHOLD:   
             return 4, word_count
-        elif word_count >= self.config.WORD_COUNT_WEAK_THRESHOLD:  # 10-24 words
+        elif word_count >= self.config.WORD_COUNT_WEAK_THRESHOLD:   
             return 2, word_count
-        else:  # < 10 words
+        else:  
             return 0, word_count
     
     def _calculate_keyword_score(self, content: str) -> Tuple[int, bool]:
@@ -214,7 +214,7 @@ class QualityScorer:
                 
         except Exception as e:
             logger.warning(f"Keyword scoring failed, using fallback: {e}")
-            # Fallback to basic matching
+          
             content_lower = content.lower()
             for keyword in self.config.QUALITY_KEYWORDS:
                 if keyword.lower() in content_lower:
@@ -233,7 +233,7 @@ class QualityScorer:
             try:
                 # Use VADER sentiment analyzer
                 scores = self.sentiment_analyzer.polarity_scores(content)
-                polarity = scores['compound']  # Range -1 to 1
+                polarity = scores['compound']  
             except Exception as e:
                 logger.warning(f"VADER sentiment analysis failed: {e}")
         
